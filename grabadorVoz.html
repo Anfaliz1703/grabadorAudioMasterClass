@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Grabador de voz · Asistente Docente IA</title>
+  <style>
+    :root{
+      --blue:#1b6cea;
+      --navy:#17315f;
+      --border:#d8e8ff;
+      --green:#17a66a;
+      --red:#e95b70;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      min-height:100vh;
+      display:grid;
+      place-items:center;
+      padding:20px;
+      font-family:Arial,sans-serif;
+      color:var(--navy);
+      background:linear-gradient(145deg,#eef6ff,#fff);
+    }
+    .card{
+      width:min(480px,100%);
+      padding:26px;
+      border:1px solid var(--border);
+      border-radius:28px;
+      background:#fff;
+      box-shadow:0 20px 60px rgba(30,80,160,.15);
+    }
+    h1{margin:0 0 6px;text-align:center}
+    .sub{
+      margin-bottom:22px;
+      text-align:center;
+      color:#657da3;
+      line-height:1.45;
+    }
+    .mic{
+      width:112px;
+      height:112px;
+      display:block;
+      margin:12px auto 16px;
+      border:0;
+      border-radius:50%;
+      background:#eaf3ff;
+      font-size:3rem;
+      cursor:pointer;
+      transition:.2s;
+    }
+    .mic.recording{
+      background:#ffe4e9;
+      transform:scale(1.05);
+      animation:pulse 1.2s infinite;
+    }
+    @keyframes pulse{
+      0%{box-shadow:0 0 0 0 rgba(233,91,112,.35)}
+      70%{box-shadow:0 0 0 18px rgba(233,91,112,0)}
+      100%{box-shadow:0 0 0 0 rgba(233,91,112,0)}
+    }
+    .timer{
+      margin-bottom:14px;
+      text-align:center;
+      font-size:1.8rem;
+      font-weight:800;
+    }
+    .status{
+      min-height:48px;
+      margin-bottom:14px;
+      padding:12px;
+      border-radius:14px;
+      background:#f5f9ff;
+      text-align:center;
+      line-height:1.4;
+    }
+    audio{
+      width:100%;
+      display:none;
+      margin:10px 0 18px;
+    }
+    .actions{
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:10px;
+    }
+    button.action{
+      min-height:48px;
+      border:0;
+      border-radius:14px;
+      padding:12px;
+      font-weight:800;
+      cursor:pointer;
+    }
+    .start{color:#fff;background:var(--blue)}
+    .stop{color:#fff;background:var(--red)}
+    .use{color:#fff;background:var(--green)}
+    .cancel{color:var(--navy);background:#eef3fa}
+    button:disabled{opacity:.4;cursor:not-allowed}
+    .note{
+      margin-top:18px;
+      color:#7184a3;
+      text-align:center;
+      font-size:.78rem;
+      line-height:1.4;
+    }
+    :focus-visible{
+      outline:3px solid rgba(27,108,234,.24);
+      outline-offset:2px;
+    }
+  </style>
+</head>
+<body>
+
+<div class="card">
+  <h1>🎤 Grabar instrucción</h1>
+
+  <div class="sub">
+    Ejemplo: “Pon 4.7 a 701-03 en Actividad 2”.
+  </div>
+
+  <button
+    id="mic"
+    class="mic"
+    type="button"
+    aria-label="Iniciar grabación"
+  >🎤</button>
+
+  <div class="timer" id="timer">00:00</div>
+
+  <div class="status" id="status">
+    Pulsa Grabar y permite el uso del micrófono.
+  </div>
+
+  <audio id="preview" controls></audio>
+
+  <div class="actions">
+    <button id="start" class="action start" type="button">Grabar</button>
+    <button id="stop" class="action stop" type="button" disabled>Detener</button>
+    <button id="use" class="action use" type="button" disabled>Usar grabación</button>
+    <button id="cancel" class="action cancel" type="button">Cancelar</button>
+  </div>
+
+  <div class="note">
+    Grabaciones de máximo 30 segundos. Esta página solo captura el audio:
+    no contiene tu API key de Gemini.
+  </div>
+</div>
+
+<script>
+const mic = document.getElementById('mic');
+const start = document.getElementById('start');
+const stop = document.getElementById('stop');
+const use = document.getElementById('use');
+const cancel = document.getElementById('cancel');
+const preview = document.getElementById('preview');
+const status = document.getElementById('status');
+const timer = document.getElementById('timer');
+
+let stream = null;
+let recorder = null;
+let chunks = [];
+let audioBlob = null;
+let seconds = 0;
+let timerId = null;
+let previewUrl = null;
+
+const query = new URLSearchParams(location.search);
+const rawOpenerOrigin = query.get('openerOrigin') || '';
+
+function getSafeOpenerOrigin(){
+  try {
+    const parsed = new URL(rawOpenerOrigin);
+
+    if (parsed.protocol !== 'https:') {
+      return '*';
+    }
+
+    return parsed.origin;
+  } catch (e) {
+    return '*';
+  }
+}
+
+const openerOrigin = getSafeOpenerOrigin();
+
+function formatTime(value){
+  const min = String(Math.floor(value / 60)).padStart(2,'0');
+  const sec = String(value % 60).padStart(2,'0');
+  return min + ':' + sec;
+}
+
+function updateTimer(){
+  timer.textContent = formatTime(seconds);
+}
+
+function chooseMimeType(){
+  const opciones = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/mp4',
+    'audio/ogg;codecs=opus'
+  ];
+
+  for (const tipo of opciones){
+    if (
+      window.MediaRecorder &&
+      MediaRecorder.isTypeSupported &&
+      MediaRecorder.isTypeSupported(tipo)
+    ){
+      return tipo;
+    }
+  }
+
+  return '';
+}
+
+async function iniciarGrabacion(){
+  if (
+    !navigator.mediaDevices ||
+    !navigator.mediaDevices.getUserMedia ||
+    !window.MediaRecorder
+  ){
+    status.textContent =
+      'Este navegador no ofrece las funciones necesarias para grabar audio.';
+    return;
+  }
+
+  try {
+    detenerStream();
+
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio:{
+        echoCancellation:true,
+        noiseSuppression:true,
+        autoGainControl:true
+      }
+    });
+
+    const mimeType = chooseMimeType();
+
+    recorder = mimeType
+      ? new MediaRecorder(stream,{mimeType})
+      : new MediaRecorder(stream);
+
+    chunks = [];
+    audioBlob = null;
+
+    if (previewUrl){
+      URL.revokeObjectURL(previewUrl);
+      previewUrl = null;
+    }
+
+    preview.removeAttribute('src');
+    preview.style.display = 'none';
+
+    recorder.addEventListener('dataavailable',function(event){
+      if (event.data && event.data.size > 0){
+        chunks.push(event.data);
+      }
+    });
+
+    recorder.addEventListener('stop',function(){
+      audioBlob = new Blob(chunks,{
+        type: recorder.mimeType || mimeType || 'audio/webm'
+      });
+
+      previewUrl = URL.createObjectURL(audioBlob);
+      preview.src = previewUrl;
+      preview.style.display = 'block';
+
+      use.disabled = false;
+      start.disabled = false;
+      stop.disabled = true;
+
+      mic.classList.remove('recording');
+      status.textContent =
+        'Grabación lista. Escúchala si quieres y luego pulsa “Usar grabación”.';
+
+      detenerStream();
+    });
+
+    recorder.start(250);
+
+    seconds = 0;
+    updateTimer();
+
+    clearInterval(timerId);
+
+    timerId = setInterval(function(){
+      seconds += 1;
+      updateTimer();
+
+      if (seconds >= 30){
+        detenerGrabacion();
+      }
+    },1000);
+
+    start.disabled = true;
+    stop.disabled = false;
+    use.disabled = true;
+
+    mic.classList.add('recording');
+
+    status.textContent = '🔴 Grabando... habla ahora.';
+
+  } catch (error) {
+    status.textContent =
+      'No pude acceder al micrófono: ' +
+      (error && error.message ? error.message : String(error));
+  }
+}
+
+function detenerGrabacion(){
+  if (recorder && recorder.state === 'recording'){
+    recorder.stop();
+  }
+
+  clearInterval(timerId);
+  timerId = null;
+
+  start.disabled = false;
+  stop.disabled = true;
+
+  mic.classList.remove('recording');
+}
+
+function detenerStream(){
+  if (!stream) return;
+
+  stream.getTracks().forEach(function(track){
+    track.stop();
+  });
+
+  stream = null;
+}
+
+function blobToBase64(blob){
+  return new Promise(function(resolve,reject){
+    const reader = new FileReader();
+
+    reader.onloadend = function(){
+      const result = String(reader.result || '');
+      const comma = result.indexOf(',');
+
+      resolve(
+        comma >= 0
+          ? result.slice(comma + 1)
+          : result
+      );
+    };
+
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function usarGrabacion(){
+  if (!audioBlob){
+    status.textContent = 'Primero graba una instrucción.';
+    return;
+  }
+
+  if (!window.opener){
+    status.textContent =
+      'No encuentro la ventana del asistente. Abre el grabador desde el botón 🎤 del chat.';
+    return;
+  }
+
+  try {
+    use.disabled = true;
+    status.textContent = 'Preparando audio...';
+
+    const base64 = await blobToBase64(audioBlob);
+
+    window.opener.postMessage(
+      {
+        type:'AUDIO_DOCENTE',
+        base64:base64,
+        mimeType:(audioBlob.type || 'audio/webm').split(';')[0]
+      },
+      openerOrigin
+    );
+
+    status.textContent = 'Audio enviado al asistente.';
+
+    setTimeout(function(){
+      window.close();
+    },500);
+
+  } catch (error) {
+    use.disabled = false;
+
+    status.textContent =
+      'Error: ' +
+      (error && error.message ? error.message : String(error));
+  }
+}
+
+function cancelarGrabacion(){
+  detenerStream();
+  clearInterval(timerId);
+
+  if (window.opener){
+    window.opener.postMessage(
+      {type:'AUDIO_DOCENTE_CANCELADO'},
+      openerOrigin
+    );
+  }
+
+  window.close();
+}
+
+mic.addEventListener('click',function(){
+  if (recorder && recorder.state === 'recording'){
+    detenerGrabacion();
+  } else {
+    iniciarGrabacion();
+  }
+});
+
+start.addEventListener('click',iniciarGrabacion);
+stop.addEventListener('click',detenerGrabacion);
+use.addEventListener('click',usarGrabacion);
+cancel.addEventListener('click',cancelarGrabacion);
+
+window.addEventListener('beforeunload',function(){
+  detenerStream();
+
+  if (previewUrl){
+    URL.revokeObjectURL(previewUrl);
+  }
+});
+
+updateTimer();
+</script>
+
+</body>
+</html>
